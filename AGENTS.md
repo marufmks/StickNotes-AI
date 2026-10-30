@@ -71,6 +71,48 @@ docker compose --profile tools run --rm migrator npm run db:studio
 | `invalid input syntax ... "[object Promise]"` | postgres.js and `drizzle-orm` both export a tag named `sql`, doing opposite jobs: Drizzle's *builds* a fragment, postgres's *executes* and returns a Promise. Using the postgres tag in `.where()` typechecks, then binds the Promise as a parameter. | Import the raw client as `pg` (see `src/db/client.ts`); use `eq()` from `drizzle-orm` for predicates. |
 | Silent no-op from `drizzle-kit` (spinner swallows the error) | Interactive TTY spinner overwrites the message. | Redirect to a file and inspect the real exit code: `node node_modules/drizzle-kit/bin.cjs migrate >out.log 2>err.log; echo $?` |
 
+## `cacheComponents: true` is ENABLED (`next.config.ts`)
+
+An async Server Component that touches uncached data (DB, `fetch`,
+`headers()`, `params`) **fails `next build`** unless one of these applies:
+
+- it sits behind `<Suspense fallback={...}>` (stream) — what `/notes` does
+- the data function opts into `"use cache"` (cache) — what `getNoteStats` does
+- the route sets `export const instant = false` (block, opt-out)
+
+Error text: `Next.js encountered uncached or runtime data during prerendering`.
+`tsc` and `next dev` do **not** catch this — only `next build` does. Run a
+production build before calling UI work done.
+
+Consequence: `db.select()` inline at the top of a page is an error here, even
+though it's valid in most Next examples you'll find online. Split the query
+into a child async component and wrap that child.
+
+Also: directories prefixed with `_` are **private folders** and are excluded
+from routing entirely (`src/app/_x/page.tsx` is not a route). Useful for
+colocation, deadly when probing for a route — you'll get a silent 404 and a
+route table that just omits it.
+
+## Server Components / Actions layout
+
+- Only two files carry directives: `src/app/notes/note-form.tsx`
+  (`"use client"`) and `src/app/notes/actions.ts` (`"use server"`). Keep it
+  that way — push `"use client"` down to the smallest interactive leaf; never
+  mark a page client to make a form work.
+- Query helpers live in `src/db/queries.ts`, not inline in pages.
+- Two valid action signatures coexist on purpose:
+  `(prevState, formData)` when the UI needs field errors via `useActionState`,
+  plain `(formData)` for fire-and-forget forms (enables progressive
+  enhancement). Bound args use `action.bind(null, id)` — the bound id is still
+  untrusted and must be validated server-side.
+- Server Actions are public POST endpoints. Validate with zod inside every
+  action; never rely on the UI being the only caller.
+- Every mutation must `revalidatePath("/notes")` or the list serves stale HTML.
+
+To verify an action without a browser, replay its real form POST: the rendered
+HTML contains `$ACTION_ID_*` / `$ACTION_REF_*` plus `$ACTION_n:1` (prevState)
+hidden fields. `curl -F` those to the page URL — no JavaScript involved.
+
 ## Conventions worth knowing
 
 - `src/env.ts` is the typed config contract (zod + `z.infer`), guarded by
