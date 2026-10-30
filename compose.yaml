@@ -1,0 +1,77 @@
+# compose.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Compose v2+ : the top-level `version:` key is obsolete. Don't add it.
+# ─────────────────────────────────────────────────────────────────────────────
+name: stickynotes-ai
+
+services:
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sticky}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sticky_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-stickynotes}
+    ports:
+      # host:container — publishes Postgres to your Mac for TablePlus/psql.
+      # Only 5432 is exposed; the container's internal port stays private.
+      - "5432:5432"
+    volumes:
+      # Named volume → data survives `docker compose down`, lost only on `-v`.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Compose interpolates ${POSTGRES_USER} at parse time (single $).
+      # Inside a compose file you'd need $$ to defer to the container's shell.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sticky} -d ${POSTGRES_DB:-stickynotes}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s  # initdb grace period: don't count failures during first boot
+
+  # ── Next.js ────────────────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      target: dev          # ← the multi-stage payoff: dev stage, not runner
+    init: true             # PID 1 signal forwarding; avoids orphaned node procs
+    ports:
+      - "3000:3000"
+    environment:
+      # THE key line. Inside this container, `db` resolves via Docker's embedded
+      # DNS to the db container. Your Mac resolves `localhost:5432` to the
+      # published port. Two vantage points, two hostnames — one URL each.
+      # Built from the same vars Postgres uses so they can never drift apart.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sticky}:${POSTGRES_PASSWORD:-sticky_dev_pw}@db:5432/${POSTGRES_DB:-stickynotes}
+    volumes:
+      - .:/app                          # live code → hot reload
+      - node_modules:/app/node_modules  # shield Linux deps from host node_modules
+      - next_cache:/app/.next          # build cache off the slow macOS bind mount
+    depends_on:
+      db:
+        condition: service_healthy      # waits for READY, not just STARTED
+
+  # ── One-off tooling (migrations, seeds, db shell) ──────────────────────────
+  # `profiles` means it never auto-starts on `docker compose up`.
+  # Run explicitly:  docker compose run --rm migrator npm run db:migrate
+  migrator:
+    build:
+      context: .
+      target: dev
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sticky}:${POSTGRES_PASSWORD:-sticky_dev_pw}@db:5432/${POSTGRES_DB:-stickynotes}
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  # Named (not anonymous) so `docker compose down` preserves your installed deps
+  # and only `down -v` wipes them. A named volume is seeded from the image's
+  # content on first attach — that's how the container gets a Linux node_modules.
+  node_modules:
+  next_cache:
